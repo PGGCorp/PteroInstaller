@@ -87,7 +87,7 @@ ptdl_dl() {
   mkdir -p /var/www/pterodactyl
   cd /var/www/pterodactyl || exit
 
-  curl -Lo panel.tar.gz "$PANEL_DL_URL"
+  curl -fL --retry 5 --retry-all-errors --speed-limit 1024 --speed-time 30 -o panel.tar.gz "$PANEL_DL_URL"
   tar -xzvf panel.tar.gz
   chmod -R 755 storage/* bootstrap/cache/
 
@@ -99,7 +99,12 @@ ptdl_dl() {
 install_composer_deps() {
   output "Installing composer dependencies .."
   [ "$OS" == "rocky" ] || [ "$OS" == "almalinux" ] && export PATH=/usr/local/bin:$PATH
-  COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader
+  local attempt
+  for attempt in 1 2 3; do
+    COMPOSER_ALLOW_SUPERUSER=1 timeout 600 composer install --no-dev --optimize-autoloader && break
+    [ "$attempt" == 3 ] && error "composer install failed" && exit 1
+    warning "composer install failed or stalled, retrying .."
+  done
   success "Installed composer dependencies!"
 }
 
@@ -233,7 +238,7 @@ php_fpm_conf() {
   curl -o /etc/php-fpm.d/www-pterodactyl.conf "$GIT_REPO_URL"/configs/www-pterodactyl.conf
 
   systemctl enable php-fpm
-  systemctl start php-fpm
+  systemctl restart php-fpm
 }
 
 ubuntu_dep() {
@@ -451,15 +456,20 @@ main() {
   MYSQL_USER="pterodactyl"
   MYSQL_PASSWORD="$(gen_passwd 64)"
 
-  readarray -t valid_timezones <<<"$(curl -s "$GIT_REPO_URL"/configs/valid_timezones.txt)"
+  readarray -t valid_timezones <<<"$(timedatectl list-timezones)"
   output "List of valid timezones here $(hyperlink "https://www.php.net/manual/en/timezones.php")"
 
   while [ -z "$timezone" ]; do
     echo -n "* Select timezone [UTC]: "
     read -r timezone_input
 
-    array_contains_element "$timezone_input" "${valid_timezones[@]}" && timezone="$timezone_input"
-    [ -z "$timezone_input" ] && timezone="UTC"
+    if [ -z "$timezone_input" ]; then
+      timezone="UTC"
+    elif array_contains_element "$timezone_input" "${valid_timezones[@]}"; then
+      timezone="$timezone_input"
+    else
+      error "Invalid timezone: $timezone_input"
+    fi
   done
 
   email_input email "Provide the email address that will be used to configure Let's Encrypt and Pterodactyl: " "Email cannot be empty or invalid"
